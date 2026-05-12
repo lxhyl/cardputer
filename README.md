@@ -9,7 +9,7 @@ sysinfo browser, two minigames, and a terminal-style Discord poster.
 
 > [中文文档 → README-CN.md](README-CN.md)
 
-![cardputer](https://docs.m5stack.com/en/core/Cardputer-Adv)
+![Cardputer-Adv running the launcher](https://raw.githubusercontent.com/lxhyl/cardputer-launcher/main/public/IMG_2206.JPG)
 
 ## Why
 

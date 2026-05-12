@@ -8,6 +8,8 @@ USB 摩斯电码灯塔 + 网页解码器、加密币行情、ENV 传感器读数
 
 > [English README → README.md](README.md)
 
+![Cardputer-Adv 运行 launcher](https://raw.githubusercontent.com/lxhyl/cardputer-launcher/main/public/IMG_2206.JPG)
+
 ## 为啥写这个
 
 UiFlow2 自带的启动器对图形化编程够用，但如果你写纯 MicroPython 你想要：
