@@ -63,7 +63,6 @@ ENV-III hat 可选（`apps/sensor/env` 用）。
 | `clock` | 北京时间大字时钟 + NTP 同步 + WiFi 状态 |
 | `morse` | 摩斯电码灯塔。三种模式（←/→ 切）：全屏 LCD 闪烁（摄像头解码）、700 Hz 音频侧音（麦克风解码）、音频解码器（麦克风输入）。配套网页解码器在 `apps/morse/decoder.html` |
 | `prices` | 加密币行情（用 `data-api.binance.vision`，国内能访问，binance.com 被墙也能用）|
-| `discord` | 输入消息按 Enter，POST 到可配置 webhook。给自己 / Discord 频道发一句话很方便 |
 | `sensor/env` | 读外接 ENV-III hat 上的 SHT30（温湿度）+ QMP6988（气压），5 Hz 刷新 + 趋势箭头 |
 | `system/wifi` | 多 SSID WiFi 管理器。显示当前连接 SSID + IP，已保存网络前缀 `*`，当前连接前缀 `>`。已知 SSID 跳过密码框。开机自动漫游到信号最强的已知 AP |
 | `system/sysinfo` | 实时系统信息 —— 运行时长、CPU 频率、MCU 温度、RAM 已用 / 剩余、完整 8 MB flash 分区表、电池电压、WiFi SSID/IP/RSSI/MAC、BLE MAC、MicroPython 版本 |
@@ -170,7 +169,6 @@ launcher/
   apps/
     btmacro/            # BLE HID 键盘
     clock/              # 全屏北京时间
-    discord/            # Webhook 推送器
     games/
       bounce/
       snake/

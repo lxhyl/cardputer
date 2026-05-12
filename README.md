@@ -72,7 +72,6 @@ saved in `/flash/wifi.json` and auto-reconnected on subsequent boots.
 | `clock` | Big Beijing-time clock with NTP sync + WiFi state. |
 | `morse` | Morse-code beacon. Three modes (cycle with ←/→): fullscreen LCD flash (decoded by camera), 700 Hz audio sidetone (decoded by mic), audio decoder (mic input). The companion web decoder lives in `apps/morse/decoder.html`. |
 | `prices` | Crypto price ticker (uses `data-api.binance.vision` so it works from networks where binance.com is blocked). |
-| `discord` | Type a message, hit Enter, it POSTs to a configurable webhook. Useful as a one-line nudge to yourself or a Discord channel. |
 | `sensor/env` | Reads SHT30 (temp + humidity) and QMP6988 (pressure) from an attached ENV-III hat. 5 Hz refresh + trend arrows. |
 | `system/wifi` | Multi-SSID WiFi manager. Shows currently connected SSID + IP, marks saved networks with `*` and the current with `>`. Skips the password prompt for known APs. Auto-roams to whichever known AP is in range on boot. |
 | `system/sysinfo` | Live system info — uptime, CPU MHz, MCU temperature, RAM free / used, full 8 MB flash partition map, battery voltage, WiFi SSID / IP / RSSI / MAC, BLE MAC, MicroPython build. |
@@ -193,7 +192,6 @@ launcher/
   apps/
     btmacro/            # BLE HID keyboard
     clock/              # full-screen Beijing clock
-    discord/            # webhook poster
     games/
       bounce/
       snake/
