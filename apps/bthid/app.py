@@ -211,6 +211,20 @@ class BLEHID:
         self._secrets = self._load_secrets()
 
         self._ble = bluetooth.BLE()
+        # CRITICAL: BLE is a process-wide singleton. If a previous run /
+        # app session already activated it, calling `config(bond=True)`
+        # below reaches into NimBLE on a live stack and triggers a hard
+        # fault (full ESP32 reset, no Python traceback). Force a clean
+        # deactivate-reactivate cycle before reconfiguring security.
+        try: self._ble.gap_advertise(None)
+        except Exception: pass
+        try:
+            if self._ble.active():
+                self._ble.active(False)
+                time.sleep_ms(100)
+        except Exception:
+            pass
+
         self._ble.irq(self._irq)
         try:
             self._ble.config(bond=True)
@@ -414,12 +428,19 @@ _BMI270_ADDR = 0x69
 _REG_CHIP_ID = 0x00
 _REG_INTERNAL_STATUS = 0x21
 _REG_ACC_X_LSB = 0x0C
+_REG_GYR_X_LSB = 0x12
 _REG_ACC_RANGE = 0x41
+_REG_GYR_RANGE = 0x43
+_REG_PWR_CTRL  = 0x7D
 _G = 9.80665
 _LSB_PER_G = (16384, 8192, 4096, 2048)
+# GYR_RANGE bits[2:0]: 0=±2000 dps, 1=±1000, 2=±500, 3=±250, 4=±125
+_GYR_DPS_PER_LSB = (2000.0/32768, 1000.0/32768, 500.0/32768,
+                    250.0/32768, 125.0/32768)
 
 
 def _bmi_init(i2c):
+    """Bring up BMI270, return (accel_scale, gyro_scale_dps)."""
     chip = i2c.readfrom_mem(_BMI270_ADDR, _REG_CHIP_ID, 1)[0]
     if chip != 0x24:
         raise OSError("BMI270 chip_id 0x{:02x}, expected 0x24".format(chip))
@@ -427,8 +448,15 @@ def _bmi_init(i2c):
     if (status & 0x01) == 0:
         from micropython_bmi270 import bmi270
         bmi270.BMI270(i2c, address=_BMI270_ADDR)
-    rng = i2c.readfrom_mem(_BMI270_ADDR, _REG_ACC_RANGE, 1)[0] & 0x03
-    return _G / _LSB_PER_G[rng]
+    # PWR_CTRL: enable accel + gyro + temp (sensor app only enables accel).
+    # Without the gyr_en bit, gyro registers stay at 0x8000 (data-not-ready).
+    cur = i2c.readfrom_mem(_BMI270_ADDR, _REG_PWR_CTRL, 1)[0]
+    i2c.writeto_mem(_BMI270_ADDR, _REG_PWR_CTRL, bytes([cur | 0x0E]))
+    time.sleep_ms(10)
+    a_rng = i2c.readfrom_mem(_BMI270_ADDR, _REG_ACC_RANGE, 1)[0] & 0x03
+    g_rng = i2c.readfrom_mem(_BMI270_ADDR, _REG_GYR_RANGE, 1)[0] & 0x07
+    g_rng = min(g_rng, len(_GYR_DPS_PER_LSB) - 1)
+    return _G / _LSB_PER_G[a_rng], _GYR_DPS_PER_LSB[g_rng]
 
 
 def _read_accel(i2c, scale):
@@ -437,27 +465,69 @@ def _read_accel(i2c, scale):
     return ax * scale, ay * scale, az * scale
 
 
-# ---------------- Tilt → cursor delta ----------------
-_DEADZONE = 0.6   # m/s² ignored as "still"
-_GAIN = 9.0       # px-per-frame per (m/s² past deadzone)
-_MAX_STEP = 30
+def _read_gyro(i2c, scale_dps):
+    """Returns (gx, gy, gz) in degrees per second."""
+    raw = i2c.readfrom_mem(_BMI270_ADDR, _REG_GYR_X_LSB, 6)
+    gx, gy, gz = struct.unpack("<hhh", raw)
+    return gx * scale_dps, gy * scale_dps, gz * scale_dps
 
 
-def _tilt_to_delta(ax, ay, neutral_ax, neutral_ay):
+# ---------------- Tilt → cursor (bounce-game style) ----------------
+# Same idea as apps/games/bounce: read raw accelerometer, subtract a
+# neutral pose, normalise to -1..+1 range, multiply by step. Tilt the
+# device the way you want the cursor to go.
+_TILT_NORM     = 6.0   # m/s²; ~37° tilt = full speed
+_TILT_STEP     = 14.0  # px per frame at full tilt (raised: 27" monitors
+                       # need real speed at full tilt — was 8 = ~270 px/s,
+                       # now ~1400 px/s)
+_TILT_DEADZONE = 0.18  # m/s²; ~1° — kills sensor noise / sub-pixel drift
+_MAX_STEP      = 70    # per-frame cap; 70 @ 30Hz ≈ 2100 px/s peak
+
+# Continuous still-pose re-calibration — auto-fixes the case where the
+# device's actual rest pose differs from whatever was captured at app
+# entry (uneven desk, user placed it down differently after pressing
+# Enter, etc).
+_STILL_WIN     = 30    # samples (~1 s @ 30 Hz)
+_STILL_RANGE   = 0.20  # m/s² max-min over window to count as "still"
+_STILL_HOLD_MS = 1000  # how long it must be still before re-cal kicks in
+
+
+def _tilt_to_cursor(ax, ay, neutral_ax, neutral_ay, accum):
+    """Bounce-style: cursor velocity ∝ tilt magnitude.
+
+    `accum` is a 2-element list — sub-pixel accumulator so very small
+    tilts (which produce <1 px/frame) eventually move the cursor instead
+    of being silently truncated to 0. Without the deadzone the same
+    accumulator silently turns ±0.1 m/s² accelerometer noise into a
+    visible drift (~4 px/sec).
+    """
     rx = ax - neutral_ax
     ry = ay - neutral_ay
+    # Symmetric deadzone subtracted off the magnitude (so just past the
+    # deadzone you get gentle motion, not a jump).
+    if abs(rx) < _TILT_DEADZONE:
+        rx = 0
+    else:
+        rx = rx - _TILT_DEADZONE if rx > 0 else rx + _TILT_DEADZONE
+    if abs(ry) < _TILT_DEADZONE:
+        ry = 0
+    else:
+        ry = ry - _TILT_DEADZONE if ry > 0 else ry + _TILT_DEADZONE
 
-    def _project(v):
-        if abs(v) < _DEADZONE:
-            return 0
-        v = v - _DEADZONE if v > 0 else v + _DEADZONE
-        return v
+    nx = -rx / _TILT_NORM   # tilt right → cursor right
+    ny =  ry / _TILT_NORM   # tilt forward (top down) → cursor down (Y inverted vs prev)
 
-    dx = int(_project(rx) * _GAIN)
-    dy = int(-_project(ry) * _GAIN)
-    if dx > _MAX_STEP: dx = _MAX_STEP
+    accum[0] += nx * _TILT_STEP
+    accum[1] += ny * _TILT_STEP
+
+    dx = int(accum[0])
+    dy = int(accum[1])
+    accum[0] -= dx
+    accum[1] -= dy
+
+    if dx >  _MAX_STEP: dx =  _MAX_STEP
     if dx < -_MAX_STEP: dx = -_MAX_STEP
-    if dy > _MAX_STEP: dy = _MAX_STEP
+    if dy >  _MAX_STEP: dy =  _MAX_STEP
     if dy < -_MAX_STEP: dy = -_MAX_STEP
     return dx, dy
 
@@ -472,12 +542,14 @@ def _shortcut(hid, mods, keys):
 
 _LIVE_TYPING = "_LIVE_"
 _MOUSE_MODE  = "_MOUSE_"
+_COMBO_MODE  = "_COMBO_"
 
 # Macro list. fn is either a sentinel (handled in run() with a sub-mode)
 # or a callable taking the BLEHID instance.
 _MACROS = (
-    ("> Live keyboard mode", _LIVE_TYPING),
-    ("> Mouse mode (tilt)",  _MOUSE_MODE),
+    ("> Combo (type + tilt)",  _COMBO_MODE),
+    ("> Live keyboard mode",   _LIVE_TYPING),
+    ("> Mouse mode (tilt)",    _MOUSE_MODE),
     ("Lock screen (Cmd+Ctrl+Q)",
      lambda h: _shortcut(h, _MOD_LGUI | _MOD_LCTRL, [0x14])),  # Q = 0x14
 )
@@ -630,7 +702,7 @@ def _draw_mouse_body(neutral, ax, ay, dx, dy, buttons):
     Lcd.print("zero  ax {:+.2f}  ay {:+.2f}".format(*neutral))
     Lcd.setTextColor(_OK if (dx or dy) else _DIM, _BG)
     Lcd.setCursor(_PAD, _HDR_H + 32)
-    Lcd.print("delta dx {:+3d}  dy {:+3d}".format(dx, dy))
+    Lcd.print("dx {:+3d}  dy {:+3d}".format(dx, dy))
     Lcd.setFont(_FONT)
     Lcd.setTextColor(_RED if buttons & 1 else _DIM, _BG)
     Lcd.setCursor(_PAD, _HDR_H + 50)
@@ -643,72 +715,113 @@ def _draw_mouse_body(neutral, ax, ay, dx, dy, buttons):
     Lcd.print("R")
 
 
-def _mouse_mode(kb_in, hid, i2c, scale):
-    Lcd.clear(_BG)
-    _draw_header("Mouse  tilt to move", color=_OK)
-    _draw_hint("Spc=L Ent=R M=mid W/S=scroll C=cal ESC")
-
-    # Neutral pose = average of first 10 reads; recalibrate with C
+def _capture_neutral(i2c, accel_scale, samples=20):
+    """Average accel over a few reads → neutral pose to subtract from
+    every subsequent reading."""
     sx = sy = 0.0
-    for _ in range(10):
-        ax, ay, _az = _read_accel(i2c, scale)
+    for _ in range(samples):
+        ax, ay, _az = _read_accel(i2c, accel_scale)
         sx += ax; sy += ay
-        time.sleep_ms(20)
-    neutral = (sx / 10, sy / 10)
+        time.sleep_ms(10)
+    return (sx / samples, sy / samples)
 
-    buttons = 0
+
+def _mouse_mode(kb_in, hid, i2c, accel_scale, gyro_scale):
+    Lcd.clear(_BG)
+    _draw_header("Mouse  calibrating...", color=_BLUE)
+    _draw_hint("hold still for 1 second")
+    neutral = _capture_neutral(i2c, accel_scale, samples=50)
+
+    _draw_header("Mouse  tilt to move", color=_OK)
+    _draw_hint("Spc=L  Ent=R  M=mid  D=drag  W/S=scroll")
+
+    held = 0          # held button bits (for drag — toggle with `D`)
     last_draw = 0
-    next_send = 0
+    last_send = 0
     SEND_MS = 30
+    accum = [0.0, 0.0]
+    still_win = []
+    still_since = -1
 
     while True:
         scroll = 0
-        click_event = False
+        click_bits = 0    # one-shot click this iteration
+        send_now = False
         k = kb_in.get_key()
         if k is not None:
-            click_event = True
+            send_now = True
             if k == KeyCode.KEYCODE_ESC:
-                # Release any held buttons before leaving
-                if buttons:
+                if held:
                     hid.send_mouse_report(0, 0, 0, 0)
                 return
             elif k == KeyCode.KEYCODE_SPACE:
-                buttons ^= 0x01
+                click_bits |= 0x01     # left click (press+release)
             elif k == KeyCode.KEYCODE_ENTER:
-                buttons ^= 0x02
+                click_bits |= 0x02     # right click (press+release)
             elif isinstance(k, int) and (k == ord("m") or k == ord("M")):
-                buttons ^= 0x04
+                click_bits |= 0x04     # middle click (press+release)
+            elif isinstance(k, int) and (k == ord("d") or k == ord("D")):
+                held ^= 0x01           # toggle drag-hold of left button
             elif isinstance(k, int) and (k == ord("c") or k == ord("C")):
-                sx = sy = 0.0
-                for _ in range(5):
-                    ax, ay, _ = _read_accel(i2c, scale)
-                    sx += ax; sy += ay
-                    time.sleep_ms(10)
-                neutral = (sx / 5, sy / 5)
-                click_event = False
+                neutral = _capture_neutral(i2c, accel_scale, samples=20)
+                accum[0] = accum[1] = 0.0
+                still_win = []
+                send_now = False
             elif isinstance(k, int) and (k == ord("w") or k == ord("W")):
                 scroll = 1
-                click_event = False
             elif isinstance(k, int) and (k == ord("s") or k == ord("S")):
                 scroll = -1
-                click_event = False
             else:
-                click_event = False
+                send_now = False
+
+        # Inline a full click cycle: press → 15ms → release. Cheap, always
+        # works regardless of when the next motion-driven report fires.
+        if click_bits and hid.is_connected():
+            hid.send_mouse_report(held | click_bits, 0, 0, 0)
+            time.sleep_ms(15)
+            hid.send_mouse_report(held, 0, 0, 0)
+            click_bits = 0
 
         try:
-            ax, ay, _az = _read_accel(i2c, scale)
+            ax, ay, _az = _read_accel(i2c, accel_scale)
         except Exception:
             ax = ay = 0.0
-        dx, dy = _tilt_to_delta(ax, ay, neutral[0], neutral[1])
 
+        # Continuous neutral re-cal: maintain a rolling stillness window
         now = time.ticks_ms()
-        if hid.is_connected() and time.ticks_diff(now, next_send) >= 0:
-            if dx or dy or scroll or click_event:
-                hid.send_mouse_report(buttons, dx, dy, scroll)
-                next_send = time.ticks_add(now, SEND_MS)
+        still_win.append((ax, ay))
+        if len(still_win) > _STILL_WIN:
+            still_win.pop(0)
+        if len(still_win) == _STILL_WIN:
+            xmin = ymin = 1e9
+            xmax = ymax = -1e9
+            for sx, sy in still_win:
+                if sx < xmin: xmin = sx
+                if sx > xmax: xmax = sx
+                if sy < ymin: ymin = sy
+                if sy > ymax: ymax = sy
+            if (xmax - xmin) < _STILL_RANGE and (ymax - ymin) < _STILL_RANGE:
+                if still_since < 0:
+                    still_since = now
+                elif now - still_since >= _STILL_HOLD_MS:
+                    sx_sum = sy_sum = 0.0
+                    for sx, sy in still_win:
+                        sx_sum += sx; sy_sum += sy
+                    neutral = (sx_sum / _STILL_WIN, sy_sum / _STILL_WIN)
+                    accum[0] = accum[1] = 0.0
+                    still_since = now  # don't recal again until next still period
+            else:
+                still_since = -1
+
+        dx, dy = _tilt_to_cursor(ax, ay, neutral[0], neutral[1], accum)
+
+        if hid.is_connected() and time.ticks_diff(now, last_send) >= SEND_MS:
+            if dx or dy or scroll or send_now:
+                hid.send_mouse_report(held, dx, dy, scroll)
+                last_send = now
 
         if time.ticks_diff(now, last_draw) > 100:
-            _draw_mouse_body(neutral, ax, ay, dx, dy, buttons)
+            _draw_mouse_body(neutral, ax, ay, dx, dy, held)
             last_draw = now
 
         time.sleep_ms(10)
@@ -768,10 +881,11 @@ def run():
     _draw_header("BLE HID  init IMU...")
     try:
         i2c = I2C(1, sda=Pin(8), scl=Pin(9), freq=400_000)
-        scale = _bmi_init(i2c)
-    except Exception as e:
+        accel_scale, gyro_scale = _bmi_init(i2c)
+    except Exception:
         # Mouse won't work but keyboard still can
-        scale = None
+        accel_scale = None
+        gyro_scale = None
         i2c = None
 
     _draw_header("BLE HID  starting BLE...")
@@ -841,7 +955,26 @@ def run():
                 if i2c is None:
                     _set_status("IMU not available", _RED)
                     continue
-                _mouse_mode(kb_in, hid, i2c, scale)
+                _mouse_mode(kb_in, hid, i2c, accel_scale, gyro_scale)
+                Lcd.clear(_BG)
+                _draw_macro_list(idx, scroll, header_text())
+                _draw_hint("Enter=pick  ^v=move  ESC=quit")
+            elif fn is _COMBO_MODE:
+                if i2c is None:
+                    _set_status("IMU not available", _RED)
+                    continue
+                # Lazy-import combo mode. Living in its own module keeps
+                # app.py small enough that BLE init doesn't hard-fault on
+                # this firmware (when the function lived inline, having
+                # all its nested closures parsed at app-import time
+                # corrupted enough state that `BLE().active(True)` later
+                # crashed the chip — see CLAUDE.md note on bthid combo).
+                import sys as _sys
+                _combo = _sys.modules.get("_combo")
+                if _combo is None:
+                    import _combo as _combo
+                _combo.run(kb_in, hid, i2c, accel_scale,
+                           _sys.modules[__name__])
                 Lcd.clear(_BG)
                 _draw_macro_list(idx, scroll, header_text())
                 _draw_hint("Enter=pick  ^v=move  ESC=quit")
