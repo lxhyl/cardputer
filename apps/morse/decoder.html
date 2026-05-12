@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Morse Decoder · ITU-R M.1677-1</title>
+<style>
+  :root {
+    --bg: #0c0c12;
+    --panel: #161622;
+    --panel-2: #1f1f2e;
+    --line: #2a2a3a;
+    --fg: #e8e8f0;
+    --dim: #7a7a8a;
+    --accent: #ffd040;
+    --ok: #4ade80;
+    --bad: #ff6b6b;
+    --blue: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+  body {
+    font: 14px/1.45 ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+    padding: 14px;
+    min-height: 100vh;
+  }
+  h1 { font-size: 15px; margin: 0 0 12px; color: var(--blue); font-weight: 600; letter-spacing: 0.01em; }
+  h1 small { color: var(--dim); font-weight: 400; margin-left: 6px; }
+  .row { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1.2fr); gap: 12px; }
+  @media (max-width: 760px) { .row { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px;
+    overflow: hidden;
+  }
+  .panel + .panel { margin-top: 12px; }
+
+  .video-wrap {
+    position: relative;
+    background: #000;
+    border-radius: 6px;
+    overflow: hidden;
+    aspect-ratio: 4 / 3;
+  }
+  video {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+  }
+  .roi-box {
+    position: absolute;
+    border: 2px solid var(--accent);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.35);
+    pointer-events: none;
+    border-radius: 2px;
+  }
+  .mic-meter {
+    height: 130px; background: #000; border-radius: 6px;
+    border: 1px solid var(--line); position: relative;
+    overflow: hidden;
+  }
+  .mic-meter canvas { width: 100%; height: 100%; display: block; }
+  .mic-hint {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--dim); font-size: 12px;
+    pointer-events: none;
+  }
+
+  .controls { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .modebar { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .modebar button {
+    border: 0; border-radius: 0; padding: 7px 12px;
+    background: transparent; color: var(--dim);
+  }
+  .modebar button.active { background: var(--blue); color: #0c0c12; }
+  .modebar button + button { border-left: 1px solid var(--line); }
+
+  button {
+    background: var(--panel-2); color: var(--fg);
+    border: 1px solid var(--line); padding: 7px 12px;
+    border-radius: 6px; cursor: pointer;
+    font: inherit;
+  }
+  button:hover { background: #2a2a40; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: var(--blue); color: #0c0c12; border-color: var(--blue); }
+  button.primary:hover { background: #7eb6ff; }
+  label.range { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; }
+  input[type="range"] { width: 110px; }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 14px; color: var(--dim); font-size: 12px; margin-bottom: 8px; }
+  .stats b { color: var(--fg); font-weight: 600; }
+
+  canvas#scope {
+    width: 100%; height: 90px;
+    background: #000; border-radius: 6px; display: block;
+  }
+
+  .label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; margin: 10px 0 4px; }
+  #live {
+    font: 600 18px/1.3 ui-monospace, monospace; color: var(--accent);
+    min-height: 24px; word-break: break-all;
+    padding: 6px 8px; background: #000; border-radius: 6px; border: 1px solid var(--line);
+  }
+  #out {
+    font: 600 22px/1.3 ui-monospace, monospace; color: var(--ok);
+    min-height: 60px; word-break: break-word;
+    padding: 8px 10px; background: #000; border-radius: 6px; border: 1px solid var(--line);
+    white-space: pre-wrap;
+  }
+
+  .tx-row {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px;
+  }
+  .tx-row input[type="text"] {
+    flex: 1 1 180px; min-width: 0;
+    background: #000; color: var(--fg);
+    border: 1px solid var(--line);
+    padding: 8px 10px; border-radius: 6px; font: inherit;
+  }
+  .tx-preview {
+    margin-top: 8px;
+    font: 12px/1.4 ui-monospace, monospace;
+    color: var(--accent);
+    background: #000;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 6px 8px;
+    min-height: 22px;
+    word-break: break-all;
+  }
+  .tx-status {
+    margin-top: 6px; font-size: 12px; color: var(--dim); min-height: 16px;
+  }
+  .tx-status.sending { color: var(--accent); }
+  .tx-status.done { color: var(--ok); }
+
+  details { margin-top: 12px; color: var(--dim); }
+  details summary { cursor: pointer; user-select: none; }
+  pre { font-size: 11px; color: var(--dim); white-space: pre-wrap; }
+  .err { color: var(--bad); margin-top: 8px; min-height: 18px; font-size: 12px; }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Morse Decoder <small>ITU-R M.1677-1 · camera + microphone, 700 Hz sidetone</small></h1>
+
+<div class="row">
+  <!-- LEFT: receive (camera or mic) -->
+  <div class="panel">
+    <div class="modebar" id="rxmode">
+      <button data-mode="camera" class="active">Camera</button>
+      <button data-mode="mic">Microphone</button>
+    </div>
+
+    <!-- camera RX -->
+    <div id="rx-camera" style="margin-top:10px">
+      <div class="video-wrap" id="vwrap">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="roi-box" id="roibox"></div>
+      </div>
+      <div class="controls">
+        <button class="primary" id="start">Start camera</button>
+        <button id="decode">Start decoding</button>
+        <button id="reset">Reset text</button>
+        <label class="range">ROI <input type="range" id="roi" min="20" max="80" value="40"> <span id="roival">40%</span></label>
+      </div>
+    </div>
+
+    <!-- mic RX -->
+    <div id="rx-mic" class="hidden" style="margin-top:10px">
+      <div class="mic-meter">
+        <canvas id="micCanvas"></canvas>
+        <div class="mic-hint" id="micHint">click "Start microphone"</div>
+      </div>
+      <div class="controls">
+        <button class="primary" id="micStart">Start microphone</button>
+        <button id="micDecode">Start decoding</button>
+        <button id="micReset">Reset text</button>
+        <label class="range">tone Hz <input type="range" id="micFreq" min="400" max="1500" step="50" value="700"> <span id="micFreqVal">700</span></label>
+      </div>
+    </div>
+
+    <div class="err" id="err"></div>
+    <details>
+      <summary>How to use</summary>
+      <pre>Camera mode (Cardputer Flash TX → web):
+  1. "Start camera" and allow access
+  2. Aim camera so the Cardputer LCD fills the yellow ROI box
+  3. On Cardputer (Flash TX): type a message, press Enter
+  4. The decoder auto-calibrates the unit time from the first few pulses
+
+Microphone mode (Cardputer Audio TX → web):
+  1. "Start microphone" and allow access
+  2. Be in the same room as the Cardputer (or point its speaker at you)
+  3. On Cardputer (Audio TX): type, press Enter
+  4. Adjust "tone Hz" if your transmitter uses a different sidetone
+
+Transmit panel (web → Cardputer mic):
+  1. On Cardputer: Tab to "Audio RX"
+  2. In the web Transmit panel: type, click Send
+  3. The web plays a 700 Hz tone train; the Cardputer decodes it
+
+Page must be served from https:// or localhost (camera/mic permission rule).</pre>
+    </details>
+  </div>
+
+  <!-- RIGHT: results + transmit -->
+  <div>
+    <div class="panel">
+      <div class="stats">
+        <span>decode: <b id="stDecode">off</b></span>
+        <span>state: <b id="stState">idle</b></span>
+        <span>WPM: <b id="stWpm">—</b></span>
+        <span>unit: <b id="stUnit">—</b></span>
+        <span>contrast: <b id="stThr">—</b></span>
+        <span>fps: <b id="stFps">—</b></span>
+      </div>
+      <canvas id="scope"></canvas>
+
+      <div class="label">Live (current letter buffer)</div>
+      <div id="live">_</div>
+
+      <div class="label">Decoded text</div>
+      <div id="out"></div>
+    </div>
+
+    <div class="panel">
+      <div class="label">Transmit (audio → Cardputer mic)</div>
+      <div class="tx-row">
+        <input id="txText" type="text" placeholder="type message" maxlength="80">
+        <label class="range">WPM <input type="range" id="txWpm" min="5" max="25" value="10"> <span id="txWpmVal">10</span></label>
+        <label class="range">Hz <input type="range" id="txFreq" min="400" max="1500" step="50" value="700"> <span id="txFreqVal">700</span></label>
+        <button class="primary" id="txSend">Send</button>
+        <button id="txStop" disabled>Stop</button>
+      </div>
+      <div class="tx-preview" id="txPreview">—</div>
+      <div class="tx-status" id="txStatus"></div>
+    </div>
+
+    <details>
+      <summary>Manual decode (offline test)</summary>
+      <div style="margin-top:8px">
+        <input id="manual" placeholder=".... . .-.. .-.. ---" style="width:60%;background:#000;color:var(--fg);border:1px solid var(--line);padding:6px;border-radius:4px;font:inherit">
+        <button id="manualBtn">Decode</button>
+        <span id="manualOut" style="margin-left:8px;color:var(--ok)"></span>
+      </div>
+    </details>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ---- ITU-R M.1677-1 international Morse table (must match Cardputer side) ----
+const MORSE = {
+  "A": ".-",     "B": "-...",   "C": "-.-.",   "D": "-..",
+  "E": ".",      "F": "..-.",   "G": "--.",    "H": "....",
+  "I": "..",     "J": ".---",   "K": "-.-",    "L": ".-..",
+  "M": "--",     "N": "-.",     "O": "---",    "P": ".--.",
+  "Q": "--.-",   "R": ".-.",    "S": "...",    "T": "-",
+  "U": "..-",    "V": "...-",   "W": ".--",    "X": "-..-",
+  "Y": "-.--",   "Z": "--..",
+  "0": "-----",  "1": ".----",  "2": "..---",  "3": "...--",
+  "4": "....-",  "5": ".....",  "6": "-....",  "7": "--...",
+  "8": "---..",  "9": "----.",
+  ".": ".-.-.-", ",": "--..--", "?": "..--..", "'": ".----.",
+  "!": "-.-.--", "/": "-..-.",  "(": "-.--.",  ")": "-.--.-",
+  "&": ".-...",  ":": "---...", ";": "-.-.-.", "=": "-...-",
+  "+": ".-.-.",  "-": "-....-", "_": "..--.-", "\"": ".-..-.",
+  "$": "...-..-", "@": ".--.-.",
+};
+const REV = Object.fromEntries(Object.entries(MORSE).map(([c, m]) => [m, c]));
+
+// ---- DOM ----
+const $ = id => document.getElementById(id);
+
+const v = $("video"), roibox = $("roibox"), vwrap = $("vwrap");
+const scope = $("scope"), sctx = scope.getContext("2d");
+const out = $("out"), live = $("live");
+const stState = $("stState"), stWpm = $("stWpm"),
+      stUnit = $("stUnit"), stThr = $("stThr"), stFps = $("stFps"),
+      stDecode = $("stDecode");
+const decodeBtn = $("decode");
+const errEl = $("err");
+const roiSlider = $("roi"), roival = $("roival");
+
+const micCanvas = $("micCanvas"), micCtx = micCanvas.getContext("2d");
+const micHint = $("micHint");
+const micStartBtn = $("micStart"), micDecodeBtn = $("micDecode"), micResetBtn = $("micReset");
+const micFreqSlider = $("micFreq"), micFreqVal = $("micFreqVal");
+
+const txText = $("txText"), txWpm = $("txWpm"), txWpmVal = $("txWpmVal");
+const txFreq = $("txFreq"), txFreqVal = $("txFreqVal");
+const txSend = $("txSend"), txStop = $("txStop");
+const txPreview = $("txPreview"), txStatus = $("txStatus");
+
+// ---- shared decoder state (source-agnostic FSM) ----
+let stream = null;
+let micStream = null;
+let source = "none";     // "camera" | "mic" | "none"
+let sampling = false;
+let micRunning = false;
+let decoding = false;
+let history = [];        // {t, b}  rolling 0..255 level buffer (last ~4 s)
+let onPulses = [];
+let curState = "off";
+let stateStart = 0;
+let unitMs = null;
+let buf = "";
+let frameCount = 0, fpsAt = 0;
+let flushed = false;
+let frameRequested = false;
+
+const sample = document.createElement("canvas");
+const sctxS = sample.getContext("2d", { willReadFrequently: true });
+
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+let micAnalyser = null;
+let micFreqBins = null;
+let micSampleRate = 48000;
+
+function fmt(n, d=0) { return Number.isFinite(n) ? n.toFixed(d) : "—"; }
+
+// ---- camera ROI box ----
+function updateRoiBox() {
+  const pct = parseInt(roiSlider.value) / 100;
+  roival.textContent = parseInt(roiSlider.value) + "%";
+  const w = vwrap.clientWidth, h = vwrap.clientHeight;
+  const side = Math.min(w, h) * pct;
+  const x = (w - side) / 2, y = (h - side) / 2;
+  roibox.style.left = x + "px";
+  roibox.style.top = y + "px";
+  roibox.style.width = side + "px";
+  roibox.style.height = side + "px";
+}
+roiSlider.addEventListener("input", updateRoiBox);
+window.addEventListener("resize", updateRoiBox);
+
+// ---- decoder FSM ----
+function resetState() {
+  onPulses = []; buf = "";
+  unitMs = null; curState = "off"; flushed = true;
+  stateStart = performance.now();
+  live.textContent = "_";
+  stWpm.textContent = "—"; stUnit.textContent = "—";
+}
+function resetAll() {
+  history = [];
+  out.textContent = "";
+  resetState();
+}
+$("reset").onclick = resetAll;
+micResetBtn.onclick = resetAll;
+
+function setDecoding(on) {
+  decoding = on;
+  stDecode.textContent = on ? "on" : "off";
+  stDecode.style.color = on ? "var(--ok)" : "var(--dim)";
+  const txt = on ? "Stop decoding" : "Start decoding";
+  decodeBtn.textContent = txt;
+  micDecodeBtn.textContent = txt;
+  decodeBtn.classList.toggle("primary", !on);
+  micDecodeBtn.classList.toggle("primary", !on);
+  if (on) resetState();
+}
+decodeBtn.onclick = () => setDecoding(!decoding);
+micDecodeBtn.onclick = () => setDecoding(!decoding);
+
+function adaptiveThreshold() {
+  const now = performance.now();
+  let mn = 255, mx = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (now - history[i].t > 3000) break;
+    if (history[i].b < mn) mn = history[i].b;
+    if (history[i].b > mx) mx = history[i].b;
+  }
+  const span = mx - mn;
+  if (span < 25) return null;
+  return { mn, mx, mid: (mn + mx) / 2, hyst: span * 0.12, span };
+}
+
+function estimateUnit(durs) {
+  if (durs.length === 0) return null;
+  const s = [...durs].sort((a, b) => a - b);
+  const mn = s[0], mx = s[s.length - 1];
+  if (mx / mn < 2.0) {
+    return s.reduce((a, b) => a + b, 0) / s.length;
+  }
+  const split = (mn + mx) / 2;
+  const dots = s.filter(d => d <= split);
+  return dots.reduce((a, b) => a + b, 0) / dots.length;
+}
+
+function decodeBuffer() {
+  if (!buf) return;
+  const ch = REV[buf];
+  out.textContent += (ch || "?");
+  buf = "";
+  live.textContent = "_";
+}
+
+function pulseEnded(state, dur) {
+  if (!unitMs) return;
+  if (state === "on") {
+    const sym = (dur < 2 * unitMs) ? "." : "-";
+    buf += sym;
+    live.textContent = buf;
+  } else {
+    if (dur < 2 * unitMs) {
+      // intra-character
+    } else if (dur < 5 * unitMs) {
+      decodeBuffer();
+    } else {
+      decodeBuffer();
+      out.textContent += " ";
+    }
+  }
+}
+
+function feedLevel(now, b) {
+  history.push({ t: now, b });
+  while (history.length && now - history[0].t > 4000) history.shift();
+
+  const thr = adaptiveThreshold();
+  if (thr) stThr.textContent = `${fmt(thr.span, 0)}`;
+  else stThr.textContent = "low";
+
+  if (decoding && thr) {
+    let nextState = curState;
+    if (curState === "off" && b > thr.mid + thr.hyst) nextState = "on";
+    else if (curState === "on" && b < thr.mid - thr.hyst) nextState = "off";
+
+    if (nextState !== curState) {
+      const dur = now - stateStart;
+      if (!(curState === "off" && unitMs === null && onPulses.length === 0)) {
+        if (curState === "on") {
+          onPulses.push(dur);
+          if (onPulses.length > 24) onPulses.shift();
+          unitMs = estimateUnit(onPulses);
+        }
+        pulseEnded(curState, dur);
+      }
+      curState = nextState;
+      stateStart = now;
+      flushed = false;
+    } else if (curState === "off" && unitMs && !flushed) {
+      const idle = now - stateStart;
+      if (idle > 5 * unitMs && buf.length > 0) {
+        decodeBuffer();
+        flushed = true;
+      } else if (idle > 9 * unitMs) {
+        flushed = true;
+      }
+    }
+  }
+
+  if (unitMs) {
+    stUnit.textContent = `${fmt(unitMs, 0)}ms`;
+    stWpm.textContent = `${fmt(1200 / unitMs, 1)}`;
+  }
+  stState.textContent = decoding ? curState : "paused";
+}
+
+// ---- camera sampling ----
+function sampleBrightness() {
+  if (!v.videoWidth) return null;
+  const W = v.videoWidth, H = v.videoHeight;
+  const pct = parseInt(roiSlider.value) / 100;
+  const side = Math.floor(Math.min(W, H) * pct);
+  const sx = Math.floor((W - side) / 2), sy = Math.floor((H - side) / 2);
+  const N = 32;
+  sample.width = N; sample.height = N;
+  sctxS.drawImage(v, sx, sy, side, side, 0, 0, N, N);
+  const img = sctxS.getImageData(0, 0, N, N).data;
+  let sum = 0;
+  for (let i = 0; i < img.length; i += 4) {
+    sum += 0.299 * img[i] + 0.587 * img[i+1] + 0.114 * img[i+2];
+  }
+  return sum / (N * N);
+}
+
+// ---- mic sampling ----
+function setupMicAnalyser(ms) {
+  const ctx = getAudioCtx();
+  micSampleRate = ctx.sampleRate;
+  const src = ctx.createMediaStreamSource(ms);
+  const an = ctx.createAnalyser();
+  an.fftSize = 2048;            // ~21 Hz bin width @ 48kHz
+  an.smoothingTimeConstant = 0;
+  src.connect(an);
+  micAnalyser = an;
+  micFreqBins = new Float32Array(an.frequencyBinCount);
+}
+
+// Energy in a small band around the configured tone, mapped to a 0..255
+// scale so the FSM is source-agnostic.
+function sampleMicEnergy() {
+  if (!micAnalyser) return null;
+  micAnalyser.getFloatFrequencyData(micFreqBins);  // dB, typically -120..0
+  const target = parseInt(micFreqSlider.value);
+  const binHz = micSampleRate / micAnalyser.fftSize;
+  const center = Math.round(target / binHz);
+  const half = 2;  // ~±42 Hz @ 2048/48k
+  let sumLin = 0, count = 0;
+  const lo = Math.max(0, center - half);
+  const hi = Math.min(micFreqBins.length - 1, center + half);
+  for (let i = lo; i <= hi; i++) {
+    sumLin += Math.pow(10, micFreqBins[i] / 20);
+    count++;
+  }
+  const meanLin = count ? sumLin / count : 0;
+  const meanDb = 20 * Math.log10(meanLin + 1e-12);
+  // Map -90..-30 dB into 0..255 — only monotonicity matters; adaptive
+  // threshold figures out the actual mark/space split.
+  return Math.max(0, Math.min(255, (meanDb + 90) * (255 / 60)));
+}
+
+function drawMicMeter(thr) {
+  const cw = micCanvas.clientWidth, ch = micCanvas.clientHeight;
+  if (micCanvas.width !== cw) micCanvas.width = cw;
+  if (micCanvas.height !== ch) micCanvas.height = ch;
+  const w = micCanvas.width, h = micCanvas.height;
+  micCtx.fillStyle = "#000"; micCtx.fillRect(0, 0, w, h);
+
+  const now = performance.now();
+  const t0 = now - 3000;
+  const pts = history.filter(p => p.t >= t0);
+  if (pts.length > 1) {
+    const span = (pts[pts.length - 1].t - pts[0].t) || 1;
+    micCtx.fillStyle = curState === "on" ? "#ffd040" : "#60a5fa";
+    const bw = Math.max(1, w / pts.length);
+    for (let i = 0; i < pts.length; i++) {
+      const x = ((pts[i].t - pts[0].t) / span) * w;
+      const barH = (pts[i].b / 255) * h;
+      micCtx.fillRect(x, h - barH, bw, barH);
+    }
+  }
+
+  if (thr) {
+    micCtx.strokeStyle = "#888"; micCtx.setLineDash([3, 4]); micCtx.lineWidth = 1;
+    const ty = h - (thr.mid / 255) * h;
+    micCtx.beginPath(); micCtx.moveTo(0, ty); micCtx.lineTo(w, ty); micCtx.stroke();
+    micCtx.setLineDash([]);
+  }
+}
+
+// ---- main loop ----
+function tick(now) {
+  frameRequested = false;
+  if (source === "none"
+      || (source === "camera" && !sampling)
+      || (source === "mic" && !micRunning)) {
+    return;
+  }
+  frameCount++;
+  if (now - fpsAt > 1000) {
+    stFps.textContent = (frameCount * 1000 / (now - fpsAt)).toFixed(0);
+    fpsAt = now; frameCount = 0;
+  }
+
+  let level = null;
+  if (source === "camera") level = sampleBrightness();
+  else if (source === "mic") level = sampleMicEnergy();
+  if (level === null) { scheduleTick(); return; }
+
+  feedLevel(now, level);
+  const thr = adaptiveThreshold();
+  if (source === "camera") drawScope(thr);
+  else drawMicMeter(thr);
+
+  scheduleTick();
+}
+
+function scheduleTick() {
+  if (!frameRequested) {
+    frameRequested = true;
+    requestAnimationFrame(tick);
+  }
+}
+
+function drawScope(thr) {
+  const cssW = scope.clientWidth, cssH = scope.clientHeight;
+  if (scope.width !== cssW) scope.width = cssW;
+  if (scope.height !== cssH) scope.height = cssH;
+  const w = scope.width, h = scope.height;
+  sctx.fillStyle = "#000"; sctx.fillRect(0, 0, w, h);
+  if (history.length < 2) return;
+  const now = performance.now();
+  const t0 = now - 3000;
+  const pts = [];
+  for (let i = 0; i < history.length; i++) if (history[i].t >= t0) pts.push(history[i]);
+  if (pts.length < 2) return;
+  const span = (pts[pts.length - 1].t - pts[0].t) || 1;
+
+  if (thr) {
+    sctx.strokeStyle = "#444"; sctx.setLineDash([3, 4]); sctx.lineWidth = 1;
+    const ty = h - (thr.mid / 255) * h;
+    sctx.beginPath(); sctx.moveTo(0, ty); sctx.lineTo(w, ty); sctx.stroke();
+    sctx.setLineDash([]);
+  }
+
+  sctx.strokeStyle = curState === "on" ? "#ffd040" : "#60a5fa";
+  sctx.lineWidth = 1.5;
+  sctx.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    const x = ((pts[i].t - pts[0].t) / span) * w;
+    const y = h - (pts[i].b / 255) * h;
+    if (i === 0) sctx.moveTo(x, y); else sctx.lineTo(x, y);
+  }
+  sctx.stroke();
+}
+
+// ---- camera start/stop ----
+$("start").onclick = async () => {
+  errEl.textContent = "";
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    });
+    v.srcObject = stream;
+    await v.play();
+    sampling = true;
+    source = "camera";
+    resetAll();
+    setDecoding(false);
+    updateRoiBox();
+    scheduleTick();
+  } catch (e) {
+    errEl.textContent = "Camera error: " + e.message + " — page must be on https:// or localhost";
+  }
+};
+
+function stopCamera() {
+  sampling = false;
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  v.srcObject = null;
+}
+
+// ---- mic start/stop ----
+micStartBtn.onclick = async () => {
+  errEl.textContent = "";
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      video: false,
+    });
+    setupMicAnalyser(micStream);
+    micRunning = true;
+    source = "mic";
+    micHint.classList.add("hidden");
+    resetAll();
+    setDecoding(false);
+    scheduleTick();
+  } catch (e) {
+    errEl.textContent = "Mic error: " + e.message + " — page must be on https:// or localhost";
+  }
+};
+
+function stopMic() {
+  micRunning = false;
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (micAnalyser) { try { micAnalyser.disconnect(); } catch (_) {} micAnalyser = null; }
+  micHint.classList.remove("hidden");
+}
+
+// ---- RX mode toggle ----
+const rxModeBar = $("rxmode");
+rxModeBar.querySelectorAll("button").forEach(b => {
+  b.onclick = () => {
+    const mode = b.dataset.mode;
+    rxModeBar.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+    $("rx-camera").classList.toggle("hidden", mode !== "camera");
+    $("rx-mic").classList.toggle("hidden", mode !== "mic");
+    if (mode === "camera") { stopMic(); source = sampling ? "camera" : "none"; }
+    else                   { stopCamera(); source = micRunning ? "mic" : "none"; }
+    resetAll();
+    setDecoding(false);
+  };
+});
+
+// ---- TX (audio out) ----
+function morseEvents(text) {
+  const out = [];
+  let wordBreak = false, first = true;
+  for (const ch of text.toUpperCase()) {
+    if (ch === " ") { wordBreak = true; continue; }
+    const code = MORSE[ch];
+    if (!code) continue;
+    if (!first) out.push(["off", wordBreak ? 7 : 3]);
+    wordBreak = false; first = false;
+    for (let i = 0; i < code.length; i++) {
+      if (i > 0) out.push(["off", 1]);
+      out.push(["on", code[i] === "." ? 1 : 3]);
+    }
+  }
+  return out;
+}
+
+function morsePreview(text) {
+  return text.toUpperCase().split(" ").map(w => {
+    return [...w].map(c => MORSE[c]).filter(Boolean).join(" ");
+  }).filter(Boolean).join(" / ");
+}
+
+function refreshTxPreview() {
+  const t = txText.value;
+  txPreview.textContent = morsePreview(t) || "—";
+  const events = morseEvents(t);
+  let units = 0;
+  for (const [, n] of events) units += n;
+  const u = 1.2 / parseInt(txWpm.value);
+  if (units) {
+    txStatus.textContent = `${units} units · ~${(units * u).toFixed(1)}s @ ${txWpm.value} WPM`;
+    txStatus.className = "tx-status";
+  } else {
+    txStatus.textContent = "";
+  }
+}
+txText.addEventListener("input", refreshTxPreview);
+txWpm.addEventListener("input", () => { txWpmVal.textContent = txWpm.value; refreshTxPreview(); });
+txFreq.addEventListener("input", () => { txFreqVal.textContent = txFreq.value; });
+micFreqSlider.addEventListener("input", () => { micFreqVal.textContent = micFreqSlider.value; });
+
+let txOsc = null, txGain = null, txTimeout = null;
+
+function stopTx() {
+  if (txTimeout) { clearTimeout(txTimeout); txTimeout = null; }
+  try { if (txGain) txGain.gain.cancelScheduledValues(0); } catch (_) {}
+  try { if (txGain) txGain.gain.value = 0; } catch (_) {}
+  try { if (txOsc) txOsc.stop(); } catch (_) {}
+  try { if (txOsc) txOsc.disconnect(); } catch (_) {}
+  try { if (txGain) txGain.disconnect(); } catch (_) {}
+  txOsc = null; txGain = null;
+  txSend.disabled = false;
+  txStop.disabled = true;
+}
+
+txSend.onclick = async () => {
+  const text = txText.value;
+  const events = morseEvents(text);
+  if (!events.length) { txStatus.textContent = "nothing to send"; return; }
+
+  stopTx();
+
+  const ctx = getAudioCtx();
+  if (ctx.state === "suspended") await ctx.resume();
+
+  const u = 1.2 / parseInt(txWpm.value);
+  const f = parseInt(txFreq.value);
+
+  txGain = ctx.createGain();
+  txGain.gain.value = 0;
+  txOsc = ctx.createOscillator();
+  txOsc.type = "sine";
+  txOsc.frequency.value = f;
+  txOsc.connect(txGain).connect(ctx.destination);
+
+  let t = ctx.currentTime + 0.15;
+  const startT = t;
+  txOsc.start(t);
+  for (const [ev, units] of events) {
+    if (ev === "on") {
+      txGain.gain.setValueAtTime(0.35, t);
+      t += units * u;
+      txGain.gain.setValueAtTime(0, t);
+    } else {
+      t += units * u;
+    }
+  }
+  // Tail silence so the receiver's adaptive threshold settles cleanly.
+  t += 0.3;
+  txOsc.stop(t);
+
+  const totalMs = (t - startT) * 1000;
+  txSend.disabled = true;
+  txStop.disabled = false;
+  txStatus.className = "tx-status sending";
+  txStatus.textContent = `sending… ${(totalMs / 1000).toFixed(1)}s`;
+
+  txTimeout = setTimeout(() => {
+    txStatus.className = "tx-status done";
+    txStatus.textContent = `sent · ${text.length} chars`;
+    stopTx();
+  }, totalMs + 50);
+};
+
+txStop.onclick = () => {
+  stopTx();
+  txStatus.className = "tx-status";
+  txStatus.textContent = "stopped";
+};
+
+// ---- manual decode helper ----
+$("manualBtn").onclick = () => {
+  const s = $("manual").value.trim();
+  const words = s.split(/\s*\/\s*|\s{3,}/);
+  const decoded = words.map(w =>
+    w.split(/\s+/).map(sym => REV[sym] || "?").join("")
+  ).join(" ");
+  $("manualOut").textContent = decoded;
+};
+
+updateRoiBox();
+refreshTxPreview();
+</script>
+</body>
+</html>
