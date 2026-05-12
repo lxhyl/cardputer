@@ -8,7 +8,7 @@ USB 摩斯电码灯塔 + 网页解码器、加密币行情、ENV 传感器读数
 
 > [English README → README.md](README.md)
 
-![Cardputer-Adv 运行 launcher](https://raw.githubusercontent.com/lxhyl/cardputer-launcher/main/public/IMG_2206.JPG)
+![Cardputer-Adv 运行 launcher](https://raw.githubusercontent.com/lxhyl/cardputer/main/public/IMG_2206.JPG)
 
 ## 为啥写这个
 
