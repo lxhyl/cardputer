@@ -21,6 +21,7 @@ import time
 
 import M5
 import network
+from machine import ADC, Pin
 from M5 import Lcd
 from hardware.matrix_keyboard import MatrixKeyboard
 from startup.cardputeradv.framework import KeyCode
@@ -74,24 +75,147 @@ _NTP_RETRY_MS = 15000
 _ntp_synced = False
 _ntp_last_try = 0
 
-# Charging detection — Cardputer-Adv has NO PMIC. Per M5Unified source
-# (src/utility/Power_Class.cpp), this board uses pmic_t::pmic_adc, meaning
-# battery voltage is read straight from an ADC on G10 with a 2:1 divider.
-# isCharging() falls through to the enum default (always "True") and
-# getVBUSVoltage() returns -1 — both unusable.
+# Cardputer-Adv has NO readable PMIC. The official schematic exposes only
+# battery voltage to Stamp-S3A G10 through R8/R12 = 100K/100K (2:1); TP4057
+# CHRG/STDBY status pins are not routed to the MCU. Therefore USB presence,
+# charging state, and battery current are not observable in software. The UI
+# must not show a charging bolt from voltage alone: a full unplugged Li-Po can
+# sit above 4.1V for a long time and is indistinguishable from CV charging.
 #
-# We infer charging from cell voltage with HYSTERESIS so we don't flicker
-# at the threshold:
-#   - Was discharging, voltage rises above HIGH_MV → flip to charging.
-#   - Was charging,    voltage drops below LOW_MV  → flip to discharging.
-#   - Anywhere between → keep current state.
-# Hi/Lo gap of ~120 mV is wide enough that ADC noise can't toggle it.
-_BATT_HIGH_MV = 4220   # only reachable while a charger sources current
-_BATT_LOW_MV  = 4100   # under load with no charger, drops here within sec
-_battery_ema = None
+# On current M5 MicroPython builds M5.Power already owns the ESP-IDF ADC
+# oneshot unit, so machine.ADC(Pin(10)) may fail with ESP_ERR_NOT_FOUND after
+# M5.begin(). We still try direct ADC first for firmware variants where it
+# works, then fall back to sanity-corrected M5.Power.getBatteryVoltage().
+_BATTERY_ADC_PIN = 10
+_BATTERY_DIVIDER = 2
+_BATTERY_ADC_SAMPLES = 5
+_BATTERY_MIN_VALID_MV = 2500
+_BATTERY_MAX_VALID_MV = 4500
+_battery_adc = None
+_battery_adc_unavailable = False
 _battery_v_ema = None
 _BATTERY_EMA_A = 0.2
-_charging_state = False
+
+# Piecewise-linear voltage → SoC table for a 1S Li-Po at moderate load.
+# Anchor points come from typical discharge curves (e.g. Panasonic NCR18650B
+# at 0.2C, scaled to single-cell). The curve is flat between 3.7-4.0V which is
+# where the cell spends most of its life — accuracy in that range matters.
+_BATT_CURVE = (
+    (3300,   0),
+    (3500,   5),
+    (3650,  10),
+    (3700,  20),
+    (3750,  35),
+    (3800,  50),
+    (3850,  62),
+    (3900,  73),
+    (3950,  82),
+    (4000,  88),
+    (4050,  93),
+    (4100,  97),
+    (4200, 100),
+)
+
+
+def _voltage_to_pct(mv):
+    if mv <= _BATT_CURVE[0][0]:
+        return 0
+    if mv >= _BATT_CURVE[-1][0]:
+        return 100
+    for i in range(len(_BATT_CURVE) - 1):
+        v1, p1 = _BATT_CURVE[i]
+        v2, p2 = _BATT_CURVE[i + 1]
+        if v1 <= mv <= v2:
+            return int(p1 + (p2 - p1) * (mv - v1) / (v2 - v1))
+    return 0
+
+
+def _valid_battery_mv(mv):
+    return _BATTERY_MIN_VALID_MV <= mv <= _BATTERY_MAX_VALID_MV
+
+
+def _init_battery_adc():
+    global _battery_adc, _battery_adc_unavailable
+    if _battery_adc is not None:
+        return _battery_adc
+    if _battery_adc_unavailable:
+        return None
+    try:
+        adc = ADC(Pin(_BATTERY_ADC_PIN))
+        try:
+            adc.atten(ADC.ATTN_11DB)
+        except Exception:
+            pass
+        try:
+            adc.width(ADC.WIDTH_12BIT)
+        except Exception:
+            pass
+        _battery_adc = adc
+        return adc
+    except Exception:
+        _battery_adc_unavailable = True
+        return None
+
+
+def _battery_mv_from_adc():
+    """Read G10 directly and undo the 100K/100K divider.
+
+    Prefer ADC.read_uv() because it uses the port's calibration path. The raw
+    fallback is less accurate but still tracks the real hardware node instead
+    of M5.Power's board-level heuristics.
+    """
+    try:
+        adc = _init_battery_adc()
+        if adc is None:
+            return 0
+        total = 0
+        count = 0
+        read_uv = getattr(adc, "read_uv", None)
+        for _ in range(_BATTERY_ADC_SAMPLES):
+            if read_uv:
+                pin_mv = read_uv() // 1000
+            else:
+                pin_mv = (adc.read() * 3300) // 4095
+            if 0 < pin_mv < 2500:
+                total += pin_mv
+                count += 1
+        if not count:
+            return 0
+        return (total // count) * _BATTERY_DIVIDER
+    except Exception:
+        return 0
+
+
+def _battery_mv_from_m5_power():
+    """Compatibility fallback for firmware where direct machine.ADC fails.
+
+    M5Unified should report real cell millivolts for pmic_adc boards. Some
+    current Cardputer-Adv MicroPython builds instead return an impossible
+    ~6.3V value for a 1S cell; keep the measured 2/3 correction only as a
+    sanity-gated fallback, not as the primary path.
+    """
+    try:
+        raw = M5.Power.getBatteryVoltage() or 0
+    except Exception:
+        return 0
+    if _valid_battery_mv(raw):
+        return raw
+    corrected = (raw * 2) // 3
+    if _valid_battery_mv(corrected):
+        return corrected
+    if 1200 <= raw <= 2500:
+        corrected = raw * _BATTERY_DIVIDER
+        if _valid_battery_mv(corrected):
+            return corrected
+    return 0
+
+
+def _battery_mv_corrected():
+    """Return best-effort real battery millivolts, or 0 on failure."""
+    mv = _battery_mv_from_adc()
+    if _valid_battery_mv(mv):
+        return mv
+    return _battery_mv_from_m5_power()
 
 
 def _load_known_networks():
@@ -266,8 +390,19 @@ def _list_items(category=None):
 def _wifi_init():
     global _wlan, _last_retry
     _wlan = network.WLAN(network.STA_IF)
-    if not _wlan.active():
+    # Boot-time radio cycle. After `M5.begin()`, the WiFi peripheral can be
+    # in an "active but not ready" state where `connect()` returns
+    # immediately and the chip silently fails AP discovery. Toggling
+    # active(False)/True forces a clean radio reset before the first
+    # connect attempt — without this you have to enter the WiFi app and
+    # press R to recover, and the status bar sits at red for ~30 s.
+    try:
+        _wlan.active(False)
+        time.sleep_ms(150)
         _wlan.active(True)
+        time.sleep_ms(150)
+    except OSError:
+        pass
     if not _wlan.isconnected():
         ssid, pwd = _load_creds()
         try:
@@ -293,6 +428,20 @@ def _wifi_retry_if_needed(state):
         return
     if time.ticks_diff(time.ticks_ms(), _last_retry) < _WIFI_RETRY_MS:
         return
+    # Cycle radio first — same reason as _wifi_init's boot cycle. If a
+    # previous connect attempt left the chip in a half-joined state,
+    # _pick_known_visible's scan() returns empty and we connect blind.
+    try:
+        _wlan.disconnect()
+    except OSError:
+        pass
+    try:
+        _wlan.active(False)
+        time.sleep_ms(150)
+        _wlan.active(True)
+        time.sleep_ms(150)
+    except OSError:
+        pass
     # Prefer whatever known AP is visible right now (so we auto-hop home /
     # phone hotspot / office), fall back to the first saved one blindly.
     pick = _pick_known_visible(_wlan)
@@ -300,10 +449,6 @@ def _wifi_retry_if_needed(state):
         ssid, pwd = _load_creds()
     else:
         ssid, pwd = pick
-    try:
-        _wlan.disconnect()
-    except OSError:
-        pass
     try:
         _wlan.connect(ssid, pwd)
     except OSError:
@@ -377,37 +522,24 @@ def _draw_battery(x, y, level, charging):
 
 
 def _read_battery():
-    """Returns (smoothed_percent, is_charging). Both signals are EMA-smoothed
-    voltage with hysteresis applied for charging state, since the Cardputer-Adv
-    has no PMIC IC to query directly."""
-    global _battery_ema, _battery_v_ema, _charging_state
+    """Returns (percent, is_charging).
+
+    `is_charging` is always False on Cardputer-Adv because the hardware does
+    not expose charger state to the MCU. Percent is estimated from smoothed
+    battery voltage through a Li-Po curve.
+    """
+    global _battery_v_ema
     try:
-        raw_pct = M5.Power.getBatteryLevel()
-        if raw_pct is None:
-            raw_pct = 0
-        try:
-            raw_mv = M5.Power.getBatteryVoltage() or 0
-        except Exception:
-            raw_mv = 0
+        mv = _battery_mv_corrected()
+        if mv <= 0:
+            return 0, False
 
-        if _battery_ema is None:
-            _battery_ema = float(raw_pct)
-        else:
-            _battery_ema = _BATTERY_EMA_A * raw_pct + (1 - _BATTERY_EMA_A) * _battery_ema
         if _battery_v_ema is None:
-            _battery_v_ema = float(raw_mv)
+            _battery_v_ema = float(mv)
         else:
-            _battery_v_ema = _BATTERY_EMA_A * raw_mv + (1 - _BATTERY_EMA_A) * _battery_v_ema
+            _battery_v_ema = _BATTERY_EMA_A * mv + (1 - _BATTERY_EMA_A) * _battery_v_ema
 
-        # Hysteresis — flip state only on a clear cross of the far threshold.
-        if _charging_state:
-            if _battery_v_ema < _BATT_LOW_MV:
-                _charging_state = False
-        else:
-            if _battery_v_ema > _BATT_HIGH_MV:
-                _charging_state = True
-
-        return int(round(_battery_ema)), _charging_state
+        return _voltage_to_pct(int(_battery_v_ema)), False
     except Exception:
         return 0, False
 

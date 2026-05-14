@@ -81,9 +81,16 @@ def _mcu_temp():
 
 def _battery_mv():
     try:
-        return M5.Power.getBatteryVoltage()
+        from launcher import _battery_mv_corrected  # type: ignore
+        v = _battery_mv_corrected()
+        return v if v > 0 else None
     except Exception:
-        return None
+        # Fallback: raw M5 reading (overshoots by ~1.5x on Cardputer-Adv,
+        # but better than nothing if launcher.py isn't importable)
+        try:
+            return M5.Power.getBatteryVoltage()
+        except Exception:
+            return None
 
 
 def _ble_mac():
@@ -147,7 +154,12 @@ def _gather():
 
     mv = _battery_mv()
     if mv is not None:
-        rows.append(("Battery", "{:.2f}V".format(mv / 1000.0)))
+        try:
+            from launcher import _voltage_to_pct  # type: ignore
+            pct = _voltage_to_pct(int(mv))
+            rows.append(("Battery", "{:.2f}V  {}%".format(mv / 1000.0, pct)))
+        except Exception:
+            rows.append(("Battery", "{:.2f}V".format(mv / 1000.0)))
 
     try:
         w = network.WLAN(network.STA_IF)

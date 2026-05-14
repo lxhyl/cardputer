@@ -283,12 +283,17 @@ def _spk_off():
 
 def _transmit_audio(buf, wpm, kb):
     u = _unit_ms(wpm)
-    try:
-        M5.Speaker.begin()
-        M5.Speaker.setPA(True)
-        M5.Speaker.setVolume(_TX_VOL)
-    except Exception:
-        pass
+    # CRITICAL: end() before begin() forces M5Unified to re-run the
+    # `_speaker_enabled_cb_cardputer_adv` ES8311 init. If our earlier
+    # `_spk_off()` direct-poked the codec into PDN state, a plain
+    # `Speaker.begin()` would short-circuit on its `_enabled=true` flag
+    # and skip the re-init — leaving the DAC powered down → no sound.
+    try: M5.Speaker.end()
+    except Exception: pass
+    try: M5.Speaker.begin()
+    except Exception: pass
+    try: M5.Speaker.setVolume(_TX_VOL)
+    except Exception: pass
 
     if not _wait_with_esc(500, kb):
         _spk_off()
@@ -527,6 +532,25 @@ def _listen(kb):
         _draw_header("mic init failed", color=_RED)
         _wait_with_esc(1500, kb)
         return "next"
+
+    # FIRMWARE WORKAROUND: M5Unified's `_microphone_enabled_cb_cardputer_adv`
+    # doesn't touch ES8311 reg 0x0A (SDP_OUT) so the codec stays at its
+    # default 24-bit-left-aligned I2S output. MicroPython's `M5.Mic.record()`
+    # binding reads at 16-bit-per-sample, so the actual audio sits in the
+    # un-read upper bits and we get flat DC ("MIC FIRMWARE BUG" warning).
+    # Forcing the codec into 16-bit I2S output aligns the two and the mic
+    # produces real samples. Value 0x0C comes straight from the M5 ES8311
+    # driver's res_map (16-bit = 3<<2). We also crank PGA + ADC volume
+    # because the cardputer-adv cb sets them to "min / 0 dB" which is
+    # quieter than the atomic_echo defaults that ship with M5.
+    try:
+        i2c = _es8311()
+        i2c.writeto_mem(0x18, 0x0A, b"\x0C")   # SDP_OUT: 16-bit I2S
+        i2c.writeto_mem(0x18, 0x16, b"\x00")   # ADC_REG16: unmute, no fade
+        i2c.writeto_mem(0x18, 0x17, b"\xFF")   # ADC_VOLUME: max (was 0xBF=0dB)
+        i2c.writeto_mem(0x18, 0x14, b"\x1A")   # ADC_PGA_GAIN: max (was 0x10)
+    except Exception:
+        pass
 
     rec_buf = bytearray(_RX_SAMPLES * 2)
     last_draw = 0
