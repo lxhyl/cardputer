@@ -2,9 +2,10 @@
 
 给 **M5Stack Cardputer-Adv** 写的一个小型「启动器系统」，跑在 MicroPython 上。
 开机进入分页 app 菜单（1.14" LCD 上），带状态栏（WiFi / 电池 / 时钟），
-支持嵌套分类文件夹，自带一堆实用 app：能正常配对 Mac 的蓝牙 HID 键盘、
-USB 摩斯电码灯塔 + 网页解码器、加密币行情、ENV 传感器读数、系统信息浏览、
-两个小游戏、终端式 Discord 推送。
+支持嵌套分类文件夹，自带一堆日常实用 app：BLE HID 键盘 + 鼠标复合设备、
+跟 Mac 同步的英文背单词器、ISS / 卫星追踪（带过境天空图）、Claude API 用量
+看板、二维码生成器、USB 摩斯电码灯塔 + 网页解码器、加密币行情、ENV
+传感器、系统信息浏览，以及四款小游戏。
 
 > [English README → README.md](README.md)
 
@@ -16,8 +17,8 @@ UiFlow2 自带的启动器对图形化编程够用，但如果你写纯 MicroPyt
 
 - 一个 `apps/<name>/app.py` 的目录，每个 app 只需要 `def run(): ...`，
   没有样板代码、没有 plist、没有 manifest。
-- 状态栏显示 WiFi 状态、IP、当前 SSID、带滞回的电池百分比（Cardputer-Adv
-  没有 PMIC，只能从 ADC 读电压），北京时间从 NTP 同步。
+- 状态栏显示 WiFi 状态、IP、当前 SSID、由 ADC 电压估算的电池百分比
+  （Cardputer-Adv 没有可读 PMIC），北京时间从 NTP 同步。
 - 多个已知 WiFi（家 / 手机热点 / 公司）之间自动漫游，不用每次输密码。
 - 能真的连上 macOS / iOS / Android / Windows 的 **BLE HID 键盘**
   （这固件上做这件事一点不简单 —— 见下面 BLE 笔记）。
@@ -61,14 +62,36 @@ ENV-III hat 可选（`apps/sensor/env` 用）。
 | App | 干啥的 |
 |-----|---|
 | `clock` | 北京时间大字时钟 + NTP 同步 + WiFi 状态 |
+| `english` | 英文背单词器。从 Mac 配套服务通过局域网拉一小批单词，每个词显示音标、释义、例句、拼音注解，SPACE 播放预录发音。统计每个词的查看时长上传给 Mac 做 SRS-style 下批选词。Mac 不在线时直接走本地缓存（不卡 UI —— 见 `apps/english/sync.py`）。详见 [apps/english/README.md](apps/english/README.md) |
+| `usage` | Claude API 用量看板。Mac 上跑一个守护进程（`server/usage_server.py`），它从 `~/.claude/.credentials.json`（macOS 上是 Keychain）读 OAuth token，从 `anthropic-ratelimit-unified-*` 响应头里读 5h session 和 7d weekly 利用率，设备上显示两个按阈值变色（绿/橙/红）的进度条 + 重置倒计时。思路移植自 [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter) |
+| `sat` | 卫星追踪 —— ISS + 载人飞船。WiFi 定位走 [BeaconDB](https://beacondb.net)（开源 MLS 替代品，免 key），TLE 从 CelesTrak 拉，用自带的 SGP4 算法（Vallado 2006）传播。显示过境列表带 az/el 和倒计时，每个过境一张极坐标天空图 |
+| `qrcode` | 二维码生成器。两种模式：preset 模式（从 `/flash/qrcode.json` 读常用条目，比如收款码、WiFi）；自由输入模式实时渲染。Tab 切纠错等级 |
 | `morse` | 摩斯电码灯塔。三种模式（←/→ 切）：全屏 LCD 闪烁（摄像头解码）、700 Hz 音频侧音（麦克风解码）、音频解码器（麦克风输入）。配套网页解码器在 `apps/morse/decoder.html` |
 | `prices` | 加密币行情（用 `data-api.binance.vision`，国内能访问，binance.com 被墙也能用）|
 | `sensor/env` | 读外接 ENV-III hat 上的 SHT30（温湿度）+ QMP6988（气压），5 Hz 刷新 + 趋势箭头 |
 | `system/wifi` | 多 SSID WiFi 管理器。显示当前连接 SSID + IP，已保存网络前缀 `*`，当前连接前缀 `>`。已知 SSID 跳过密码框。开机自动漫游到信号最强的已知 AP |
 | `system/sysinfo` | 实时系统信息 —— 运行时长、CPU 频率、MCU 温度、RAM 已用 / 剩余、完整 8 MB flash 分区表、电池电压、WiFi SSID/IP/RSSI/MAC、BLE MAC、MicroPython 版本 |
-| `btmacro` | **BLE HID 键盘**。能连 macOS、iOS、Android、Windows。带 bond 持久化 —— 配对一次永久记住。Live typing 模式把 Cardputer 上每个键（包括方向键 / Enter / 带 shift 的符号）转发到 host。带一个 Cmd+Ctrl+Q 锁屏 macro |
+| `bthid` | **BLE HID 复合设备 —— 键盘 + 鼠标走同一个 GATT 服务**。配对一次后能连 macOS / iOS / Android / Windows，bond 信息存 `/flash/ble_bonds.json` 跨重启保留。倾斜设备（BMI270）控制鼠标光标；键盘按键直接转发；方向键当左/右键 + 滚轮。带一个 Cmd+Ctrl+Q 锁屏 macro |
 | `games/snake` | 贪吃蛇 |
 | `games/bounce` | 类乒乓球 |
+| `games/tank` | 坦克大战 NES 复刻版 —— 满屏 24×12 战场，每关 20 个敌人，砖块可破坏 |
+| `games/raiden` | 纵向卷轴飞行射击（雷电 / 1942 风格），带星空背景、能量道具、Boss |
+
+### 设备本地配置
+
+需要 WiFi 密码、Mac 局域网地址、其他敏感配置的 app 都从 `/flash/` 下的
+JSON 文件读取，**这些文件不进 git**（见 `.gitignore`）。
+模式：源码默认值留空，真实配置只在设备上写一次。当前列表：
+
+| App | 文件 | 内容 |
+| --- | --- | --- |
+| WiFi 漫游 | `/flash/wifi.json` | 已知 SSID/密码列表 |
+| `bthid` | `/flash/ble_bonds.json` | BLE 配对密钥 |
+| `english` | `/flash/english.json` | Mac host/port/token |
+| `usage` | `/flash/usage.json` | usage-server 端点 URL |
+| `qrcode` | `/flash/qrcode.json` | 预设二维码条目 |
+| `sat` | `/flash/sat_loc.json` | 手动指定经纬度 |
+| `morse` | `apps/morse/{cert,key}.pem` | 解码器页面用的自签 TLS |
 
 ## 自己写一个 app
 
@@ -142,10 +165,11 @@ def run():
 
 ### 电池（Cardputer-Adv 没有 PMIC）
 
-`M5.Power.getBatteryLevel()` 在这板子上不可靠，因为 M5Unified 驱动假设
-有 PMIC 芯片但实际没有。只有 `getBatteryVoltage()` 准。launcher
-推算百分比时用**滞回阈值**（充电 4.22 V，放电 4.10 V），避免 USB
-供电时在 100% 附近抖动。
+Cardputer-Adv 只把电池电压通过 100K/100K 分压接到 Stamp-S3A 的
+GPIO10。TP4057 的充电状态 / 电流、USB VBUS 都没有接到 MCU，所以
+launcher 不能只凭电压判断“正在充电”。现在 launcher 用实测/校正后的
+电池电压按 1S Li-Po 电压曲线估算百分比；这块板上刻意不显示
+闪电/充电图标。
 
 ### WiFi（仅 2.4 GHz）
 
@@ -165,23 +189,29 @@ Cardputer-Adv 的 IR LED 是 GPIO 直驱（没有三极管），峰值 ~12 mA，
 ```
 launcher/
   main.py               # 入口 —— 只 import launcher 然后跑 launcher.run()
-  launcher.py           # 菜单 + 状态栏 + WiFi 漫游 + codec 关电源
+  launcher.py           # 菜单 + 状态栏 + WiFi 漫游 + 电池估算 + codec 关电源
   apps/
-    btmacro/            # BLE HID 键盘
+    bthid/              # BLE HID 复合设备（键盘 + 倾斜鼠标）
     clock/              # 全屏北京时间
+    english/            # 背单词器（Mac 同步、音频播放、SRS）
     games/
       bounce/
+      raiden/           # 纵向卷轴飞行射击
       snake/
+      tank/             # 坦克大战
     morse/              # 闪光 + 音频摩斯灯塔，配套网页解码器
       decoder.html      # 摄像头 + 麦克风摩斯解码器 UI
       serve.py          # 解码器页面的 HTTPS server
       gencert.sh        # 生成自签 TLS 证书
     prices/             # 加密币行情
+    qrcode/             # 二维码生成器（带预设）
+    sat/                # ISS / 卫星追踪（SGP4 + 天空图）
     sensor/
       env/              # SHT30 + QMP6988（ENV-III hat）
     system/
       sysinfo/          # 实时系统信息
       wifi/             # 多 SSID WiFi 管理
+    usage/              # Claude API 用量看板
   libs/                 # 共享驱动（SHT30、QMP6988、BMI270）
 ```
 

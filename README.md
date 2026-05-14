@@ -3,9 +3,11 @@
 A small home-grown "launcher OS" for the **M5Stack Cardputer-Adv** running
 MicroPython. Boots into a paged app menu on the 1.14" LCD with a
 status bar (WiFi / battery / clock), supports nested category folders,
-and ships with a handful of useful apps: a real BLE HID keyboard, a
-USB-Morse beacon + decoder, a crypto ticker, an env-sensor reader, a
-sysinfo browser, two minigames, and a terminal-style Discord poster.
+and ships with apps for everyday use: a composite BLE HID keyboard +
+mouse, an English vocabulary trainer that syncs with a Mac, an ISS /
+satellite tracker with skyplot, a Claude API usage dashboard, a QR-code
+generator, a USB-Morse beacon + web decoder, a crypto ticker, env
+sensors, a sysinfo browser, and four arcade games.
 
 > [中文文档 → README-CN.md](README-CN.md)
 
@@ -18,9 +20,9 @@ plain MicroPython you want:
 
 - A folder of `apps/<name>/app.py` files where each just exposes
   `def run(): ...` — no boilerplate, no plist, no manifest.
-- A status bar that shows WiFi state, IP, current SSID, battery percent
-  with hysteresis (Cardputer-Adv has no PMIC — only the ADC voltage),
-  and Beijing-time clock from NTP.
+- A status bar that shows WiFi state, IP, current SSID, ADC-derived
+  battery percent (Cardputer-Adv has no readable PMIC), and
+  Beijing-time clock from NTP.
 - Auto-roaming WiFi between known APs (home / phone hotspot / office)
   without prompting for a password each time.
 - A working **BLE HID keyboard** that actually pairs with macOS,
@@ -70,14 +72,37 @@ saved in `/flash/wifi.json` and auto-reconnected on subsequent boots.
 | App | What it does |
 |-----|---|
 | `clock` | Big Beijing-time clock with NTP sync + WiFi state. |
+| `english` | Vocabulary trainer. Pulls a small word batch from a Mac companion app over the LAN with IPA, definition, example, pinyin gloss, and pre-recorded pronunciation. Tracks per-word view duration → SRS-style next-batch selection. Falls back to the on-device cache when the Mac is offline (no UI hang — see `apps/english/sync.py`). See [apps/english/README.md](apps/english/README.md). |
+| `usage` | Claude API usage dashboard. Polls a Mac daemon (`server/usage_server.py`) that reads your Claude OAuth token from `~/.claude/.credentials.json` (or macOS Keychain), pulls 5h-session and 7d-weekly utilization from the `anthropic-ratelimit-unified-*` response headers, and shows two color-coded bars (green / amber / red by threshold) plus countdown to reset. Idea ported from [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter). |
+| `sat` | Satellite tracker — ISS + crew vehicles. WiFi-geolocates via [BeaconDB](https://beacondb.net) (open MLS replacement, no key), pulls TLEs from CelesTrak, and propagates with a self-contained SGP4 implementation (Vallado 2006). Shows a pass list with az/el and time-until, plus a polar skyplot per pass. |
+| `qrcode` | QR-code generator. Two modes: presets (from `/flash/qrcode.json`) for things you scan often (payment codes, WiFi, etc.), or live free-form text input. Tab cycles error-correction level. |
 | `morse` | Morse-code beacon. Three modes (cycle with ←/→): fullscreen LCD flash (decoded by camera), 700 Hz audio sidetone (decoded by mic), audio decoder (mic input). The companion web decoder lives in `apps/morse/decoder.html`. |
 | `prices` | Crypto price ticker (uses `data-api.binance.vision` so it works from networks where binance.com is blocked). |
 | `sensor/env` | Reads SHT30 (temp + humidity) and QMP6988 (pressure) from an attached ENV-III hat. 5 Hz refresh + trend arrows. |
 | `system/wifi` | Multi-SSID WiFi manager. Shows currently connected SSID + IP, marks saved networks with `*` and the current with `>`. Skips the password prompt for known APs. Auto-roams to whichever known AP is in range on boot. |
 | `system/sysinfo` | Live system info — uptime, CPU MHz, MCU temperature, RAM free / used, full 8 MB flash partition map, battery voltage, WiFi SSID / IP / RSSI / MAC, BLE MAC, MicroPython build. |
-| `btmacro` | **BLE HID keyboard.** Pairs with macOS, iOS, Android, Windows. Bonded — re-pair only on first connect. Live-typing mode forwards every Cardputer keystroke (including arrows / Enter / shifted symbols) to the host. Includes a Cmd+Ctrl+Q lock-screen macro. |
+| `bthid` | **BLE HID composite — keyboard + mouse over a single GATT service.** Pairs once with macOS / iOS / Android / Windows; bond persists across reboots in `/flash/ble_bonds.json`. Tilt the device (BMI270) to move the mouse cursor; the keyboard sends real key events; arrow keys = clicks / scroll. Includes a Cmd+Ctrl+Q lock-screen macro. |
 | `games/snake` | Snake. |
 | `games/bounce` | Pong-ish bouncing ball. |
+| `games/tank` | Battle City (坦克大战) clone — full-width 24×12 playfield, 20 enemies per stage, destructible bricks. |
+| `games/raiden` | Vertical-scrolling shooter (Raiden / 1942 style) with starfield, power-ups, and boss waves. |
+
+### Device-local configuration
+
+Apps that need WiFi credentials, Mac LAN endpoints, or other secrets read
+them from per-device JSON files under `/flash/` that are **never committed**
+(see `.gitignore`). The pattern: source-code default is empty, real values
+live in a JSON file you create on the device once. Current files:
+
+| App | File | Contents |
+| --- | --- | --- |
+| WiFi roaming | `/flash/wifi.json` | known SSID/password list |
+| `bthid` | `/flash/ble_bonds.json` | persisted BLE bond keys |
+| `english` | `/flash/english.json` | Mac host/port/token |
+| `usage` | `/flash/usage.json` | usage-server endpoint URL |
+| `qrcode` | `/flash/qrcode.json` | preset QR entries |
+| `sat` | `/flash/sat_loc.json` | manual lat/lon override |
+| `morse` | `apps/morse/{cert,key}.pem` | self-signed TLS for the decoder page |
 
 ## Building your own app
 
@@ -162,11 +187,12 @@ to be set up correctly before the host accepts the device:
 
 ### Battery (Cardputer-Adv has no PMIC)
 
-`M5.Power.getBatteryLevel()` is unreliable here because the M5Unified
-driver assumes a PMIC chip the board doesn't have. Only
-`getBatteryVoltage()` works. The launcher derives a percentage with
-**hysteresis** (charging threshold 4.22 V, discharging threshold 4.10 V)
-to avoid flicker around 100% under USB power.
+Cardputer-Adv exposes only battery voltage to Stamp-S3A GPIO10 through
+a 100K/100K divider. TP4057 charger status/current and USB VBUS are not
+routed to the MCU, so the launcher must not claim "charging" from
+voltage alone. It estimates percentage from the measured/corrected
+battery voltage and a 1S Li-Po voltage curve. The lightning/charging
+indicator is intentionally not shown on this board.
 
 ### WiFi (2.4 GHz only)
 
@@ -188,23 +214,29 @@ reliable IR, write that app in Arduino + IRremote, not MicroPython.
 ```
 launcher/
   main.py               # boot entry — just imports launcher.run()
-  launcher.py           # menu + status bar + WiFi auto-roam + codec helpers
+  launcher.py           # menu + status bar + WiFi auto-roam + battery + codec helpers
   apps/
-    btmacro/            # BLE HID keyboard
+    bthid/              # BLE HID composite (keyboard + tilt mouse)
     clock/              # full-screen Beijing clock
+    english/            # vocabulary trainer (Mac sync, audio playback, SRS)
     games/
       bounce/
+      raiden/           # vertical-scrolling shooter
       snake/
+      tank/             # Battle City clone
     morse/              # flash + audio Morse beacon, web decoder
       decoder.html      # camera + microphone Morse decoder UI
       serve.py          # HTTPS server for the decoder page
       gencert.sh        # generates the self-signed TLS cert
     prices/             # crypto ticker
+    qrcode/             # QR-code generator with presets
+    sat/                # ISS / satellite tracker (SGP4 + skyplot)
     sensor/
       env/              # SHT30 + QMP6988 (ENV-III hat)
     system/
       sysinfo/          # live system info
       wifi/             # multi-SSID WiFi manager
+    usage/              # Claude API usage dashboard
   libs/                 # shared drivers (SHT30, QMP6988, BMI270)
 ```
 
