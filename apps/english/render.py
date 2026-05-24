@@ -245,7 +245,7 @@ class Renderer:
         Lcd.fillRect(0, y, Lcd.width(), _HINT_H - 1, _BG)
         Lcd.setFont(_F_SMALL)
         Lcd.setTextColor(_DIM, _BG)
-        hint = "a/d word  w/s scroll  SPC play  ENT known  ESC"
+        hint = "a/d  w/s  SPC word  p ex  ENT known  ESC"
         Lcd.setCursor((Lcd.width() - _safe_text_width(hint, _F_SMALL)) // 2, y + 1)
         Lcd.print(hint)
 

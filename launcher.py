@@ -26,6 +26,9 @@ from M5 import Lcd
 from hardware.matrix_keyboard import MatrixKeyboard
 from startup.cardputeradv.framework import KeyCode
 
+import sensors
+import env_daemon
+
 _APPS_DIR = "/flash/apps"
 _WIFI_CFG = "/flash/wifi.json"
 
@@ -545,13 +548,14 @@ def _read_battery():
 
 
 def _draw_status_bar(force=False):
-    """Repaints WiFi + clock + battery indicators. Cached: only repaints when
-    any displayed value changes, unless force=True."""
+    """Repaints WiFi + ENV + clock + battery indicators. Cached: only
+    repaints when any displayed value changes, unless force=True."""
     global _last_status_drawn
     state = _wifi_state()
     level, charging = _read_battery()
     clock = _bj_clock_text()
-    key = (state, level, charging, clock)
+    env_state = env_daemon.state()
+    key = (state, level, charging, clock, env_state)
     if not force and key == _last_status_drawn:
         return
     _last_status_drawn = key
@@ -564,6 +568,21 @@ def _draw_status_bar(force=False):
     # WiFi icon (left): icon spans cy-11..cy+1, so cy=bar_mid+5 ≈ 16 centers it.
     wifi_color = _OK if state == "ok" else (_WAIT if state == "wait" else _ERR)
     _draw_wifi_icon(14, bar_mid + 5, wifi_color)
+
+    # ENV tag, immediately right of WiFi icon. Hidden when daemon "off"
+    # (no /flash/env_upload.json) — keeps the bar uncluttered for users
+    # who haven't configured uploads. Color encodes liveness:
+    #   green  = recent successful POST
+    #   yellow = init / stale (>3× interval since last good POST)
+    #   red    = error (no wifi / sensor unplugged / HTTP fail)
+    if env_state != "off":
+        env_color = (_OK if env_state == "ok" else
+                     (_ERR if env_state == "err" else _WAIT))
+        Lcd.setFont(_SMALL)
+        Lcd.setTextColor(env_color, _BG)
+        env_h = Lcd.fontHeight(_SMALL)
+        Lcd.setCursor(30, (_STATUS_H - env_h) // 2)
+        Lcd.print("ENV")
 
     # Center: clock (Beijing). Empty string before NTP syncs.
     Lcd.setFont(_SMALL)
@@ -818,6 +837,10 @@ def run():
     # path which we bypass), so the codec is at factory power-on default
     # = quiet. Writing it here would only put it into a non-default state.
     _wifi_init()
+    # Start the single-owner sensor service BEFORE the uploader so the
+    # daemon's first cycle has fresh data to publish.
+    sensors.start()
+    env_daemon.start()
 
     category = None
     items = _list_items(None)

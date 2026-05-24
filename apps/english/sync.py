@@ -160,10 +160,14 @@ def _save_words(batch_id, words):
         json.dump({"batch_id": batch_id, "words": words}, f)
 
 
-def _existing_audio_sha(word_id):
+def _existing_audio_sha(word_id, kind="word"):
     """Cheap sha cache check: we don't actually hash, we keep a sidecar
-    .sha file next to each .wav. If sidecar matches expected, skip download."""
-    path = "{}/{}.sha".format(_AUDIO_DIR, word_id)
+    .sha file next to each .wav. If sidecar matches expected, skip download.
+
+    `kind` is "word" (the headword pronunciation) or "example" (the example
+    sentence, stored as <id>_ex.{wav,sha})."""
+    suffix = "_ex" if kind == "example" else ""
+    path = "{}/{}{}.sha".format(_AUDIO_DIR, word_id, suffix)
     try:
         with open(path) as f:
             return f.read().strip()
@@ -171,33 +175,39 @@ def _existing_audio_sha(word_id):
         return None
 
 
-def _save_audio_sha(word_id, sha):
+def _save_audio_sha(word_id, sha, kind="word"):
+    suffix = "_ex" if kind == "example" else ""
     try:
-        with open("{}/{}.sha".format(_AUDIO_DIR, word_id), "w") as f:
+        with open("{}/{}{}.sha".format(_AUDIO_DIR, word_id, suffix), "w") as f:
             f.write(sha)
     except Exception:
         pass
 
 
-def audio_path(word_id):
-    return "{}/{}.wav".format(_AUDIO_DIR, word_id)
+def audio_path(word_id, kind="word"):
+    suffix = "_ex" if kind == "example" else ""
+    return "{}/{}{}.wav".format(_AUDIO_DIR, word_id, suffix)
 
 
 def _clean_old_audio(keep_ids):
-    """Delete audio files for words that aren't in keep_ids."""
+    """Delete audio files for words that aren't in keep_ids. Also matches
+    the `<id>_ex.{wav,sha}` example sentence variant."""
     keep = set(str(i) for i in keep_ids)
     try:
         entries = os.listdir(_AUDIO_DIR)
     except OSError:
         return
     for name in entries:
-        if name.endswith(".wav") or name.endswith(".sha"):
-            wid = name.rsplit(".", 1)[0]
-            if wid not in keep:
-                try:
-                    os.remove(_AUDIO_DIR + "/" + name)
-                except OSError:
-                    pass
+        if not (name.endswith(".wav") or name.endswith(".sha")):
+            continue
+        stem = name.rsplit(".", 1)[0]
+        if stem.endswith("_ex"):
+            stem = stem[:-3]
+        if stem not in keep:
+            try:
+                os.remove(_AUDIO_DIR + "/" + name)
+            except OSError:
+                pass
 
 
 def checkin(cfg, prev_batch_id, reviews, status_cb=None):
@@ -232,23 +242,24 @@ def checkin(cfg, prev_batch_id, reviews, status_cb=None):
                 pass
 
 
-def download_audio(cfg, word_id, expected_sha, status_cb=None):
-    """Fetch /audio/<id>.wav and write to local audio dir. Skip if the
-    sidecar sha matches expected_sha AND the .wav file is non-empty.
-    Returns True on success or skip. On error or partial download, the
-    target file is removed so the next call retries cleanly instead of
-    leaving a 0-byte placeholder."""
-    if expected_sha and _existing_audio_sha(word_id) == expected_sha:
+def download_audio(cfg, word_id, expected_sha, status_cb=None, kind="word"):
+    """Fetch /audio/<id>.wav (or <id>_ex.wav for kind="example") and write
+    to the local audio dir. Skip if the sidecar sha matches expected_sha
+    AND the .wav file is non-empty. Returns True on success or skip. On
+    error or partial download, the target file is removed so the next
+    call retries cleanly instead of leaving a 0-byte placeholder."""
+    if expected_sha and _existing_audio_sha(word_id, kind) == expected_sha:
         try:
-            if os.stat(audio_path(word_id))[6] > 0:
+            if os.stat(audio_path(word_id, kind))[6] > 0:
                 return True
         except OSError:
             pass  # sha matched but file missing — re-download
+    suffix = "_ex" if kind == "example" else ""
     if status_cb:
-        status_cb("dl {}".format(word_id))
-    url = "{}/audio/{}.wav{}".format(_base_url(cfg), word_id, _qs_token(cfg))
+        status_cb("dl {}{}".format(word_id, suffix))
+    url = "{}/audio/{}{}.wav{}".format(_base_url(cfg), word_id, suffix, _qs_token(cfg))
     r = None
-    target = audio_path(word_id)
+    target = audio_path(word_id, kind)
     try:
         gc.collect()
         r = _requests.get(url, timeout=_HTTP_TIMEOUT)
@@ -270,7 +281,7 @@ def download_audio(cfg, word_id, expected_sha, status_cb=None):
         except OSError:
             return False
         if expected_sha:
-            _save_audio_sha(word_id, expected_sha)
+            _save_audio_sha(word_id, expected_sha, kind)
         return True
     except Exception:
         # Remove any partially-written file so the retry path sees a
@@ -307,13 +318,17 @@ def ensure_synced(cfg, force=False, status_cb=None):
 
     batch_id = resp.get("batch_id")
     words = resp.get("words", []) or []
-    # Download all audio for the new batch.
+    # Download all audio for the new batch — both the headword and
+    # (when present) the example sentence.
     for w in words:
-        sha = w.get("audio_sha") or ""
         wid = w.get("id")
         if wid is None:
             continue
-        download_audio(cfg, wid, sha, status_cb=status_cb)
+        sha = w.get("audio_sha") or ""
+        download_audio(cfg, wid, sha, status_cb=status_cb, kind="word")
+        ex_sha = w.get("example_audio_sha") or ""
+        if ex_sha:
+            download_audio(cfg, wid, ex_sha, status_cb=status_cb, kind="example")
     # Persist new batch + state, prune stale audio.
     _save_words(batch_id, words)
     save_state({"prev_batch_id": batch_id})

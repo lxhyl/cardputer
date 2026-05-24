@@ -138,28 +138,30 @@ def _spk_off():
         pass
 
 
-def _audio_exists(word_id):
+def _audio_exists(word_id, kind="word"):
     if word_id is None or word_id < 0:
         return False
     try:
-        os.stat(sync.audio_path(word_id))
+        os.stat(sync.audio_path(word_id, kind))
         return True
     except OSError:
         return False
 
 
-def _play_for(word, renderer):
+def _play_for(word, renderer, kind="word"):
     if word is None:
         return False
     wid = word.get("id")
-    if not _audio_exists(wid):
-        renderer.status("no audio", color=0xFF8855)
+    if not _audio_exists(wid, kind):
+        msg = "no example audio" if kind == "example" else "no audio"
+        renderer.status(msg, color=0xFF8855)
         return False
-    renderer.status("playing", color=0x66DD99)
+    label = "playing ex" if kind == "example" else "playing"
+    renderer.status(label, color=0x66DD99)
     from . import audio as _audio
     _spk_on()
     try:
-        ok = _audio.play(sync.audio_path(wid))
+        ok = _audio.play(sync.audio_path(wid, kind))
     finally:
         _spk_off()
     renderer.status(None)
@@ -268,7 +270,13 @@ def run():
             elif k == KeyCode.KEYCODE_DOWN or k == ord("s") or k == ord("."):
                 renderer.scroll(+1)
             elif k == SPACE or k == 32:
-                ok = _play_for(state.current(), renderer)
+                ok = _play_for(state.current(), renderer, kind="word")
+                cur_played = cur_played or ok
+            elif k == ord("p"):
+                # Play the example sentence audio (if the Mac generated
+                # one for this word). Counts as "played_audio" too — the
+                # user is still engaging with the pronunciation.
+                ok = _play_for(state.current(), renderer, kind="example")
                 cur_played = cur_played or ok
             elif k == ord("r"):
                 # Force-refresh: re-sync from Mac.
