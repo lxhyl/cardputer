@@ -4,10 +4,10 @@ A small home-grown "launcher OS" for the **M5Stack Cardputer-Adv** running
 MicroPython. Boots into a paged app menu on the 1.14" LCD with a
 status bar (WiFi / battery / clock), supports nested category folders,
 and ships with apps for everyday use: a composite BLE HID keyboard +
-mouse, an English vocabulary trainer that syncs with a Mac, an ISS /
-satellite tracker with skyplot, a Claude API usage dashboard, a QR-code
+mouse, an English vocabulary trainer that syncs with a Mac, a GPS
+receiver (multi-GNSS NMEA), a Claude API usage dashboard, a QR-code
 generator, a USB-Morse beacon + web decoder, a crypto ticker, env
-sensors, a sysinfo browser, and four arcade games.
+sensors with CO2, a sysinfo browser, and four arcade games.
 
 > [中文文档 → README-CN.md](README-CN.md)
 
@@ -74,11 +74,11 @@ saved in `/flash/wifi.json` and auto-reconnected on subsequent boots.
 | `clock` | Big Beijing-time clock with NTP sync + WiFi state. |
 | `english` | Vocabulary trainer. Pulls a small word batch from a Mac companion app over the LAN with IPA, definition, example, pinyin gloss, and pre-recorded pronunciation. Tracks per-word view duration → SRS-style next-batch selection. Falls back to the on-device cache when the Mac is offline (no UI hang — see `apps/english/sync.py`). See [apps/english/README.md](apps/english/README.md). |
 | `usage` | Claude API usage dashboard. Polls a Mac daemon (`server/usage_server.py`) that reads your Claude OAuth token from `~/.claude/.credentials.json` (or macOS Keychain), pulls 5h-session and 7d-weekly utilization from the `anthropic-ratelimit-unified-*` response headers, and shows two color-coded bars (green / amber / red by threshold) plus countdown to reset. Idea ported from [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter). |
-| `sat` | Satellite tracker — ISS + crew vehicles. WiFi-geolocates via [BeaconDB](https://beacondb.net) (open MLS replacement, no key), pulls TLEs from CelesTrak, and propagates with a self-contained SGP4 implementation (Vallado 2006). Shows a pass list with az/el and time-until, plus a polar skyplot per pass. |
+| `gps` | GPS / multi-GNSS receiver. Drives the M5 GPS Unit V1.1 (AT6668 + MAX2659 LNA, GPS/BD/GAL/GLO/QZSS) over UART NMEA 0183 at 115200. Shows fix status, lat/lon, sats used / in view + HDOP, UTC date/time, speed/course, altitude. Validates per-sentence checksums to filter line noise from the shared Grove bus. |
 | `qrcode` | QR-code generator. Two modes: presets (from `/flash/qrcode.json`) for things you scan often (payment codes, WiFi, etc.), or live free-form text input. Tab cycles error-correction level. |
 | `morse` | Morse-code beacon. Three modes (cycle with ←/→): fullscreen LCD flash (decoded by camera), 700 Hz audio sidetone (decoded by mic), audio decoder (mic input). The companion web decoder lives in `apps/morse/decoder.html`. |
 | `prices` | Crypto price ticker (uses `data-api.binance.vision` so it works from networks where binance.com is blocked). |
-| `sensor/env` | Reads SHT30 (temp + humidity) and QMP6988 (pressure) from an attached ENV-III hat. 5 Hz refresh + trend arrows. |
+| `sensor/env` | Reads SHT30 (temp + humidity), QMP6988 (pressure), and SCD40 (CO2 ppm) from chained M5 Unit I2C modules. 5 Hz refresh + trend arrows; CO2 row updates every 5 s per SCD40 periodic-mode cadence. |
 | `system/wifi` | Multi-SSID WiFi manager. Shows currently connected SSID + IP, marks saved networks with `*` and the current with `>`. Skips the password prompt for known APs. Auto-roams to whichever known AP is in range on boot. |
 | `system/sysinfo` | Live system info — uptime, CPU MHz, MCU temperature, RAM free / used, full 8 MB flash partition map, battery voltage, WiFi SSID / IP / RSSI / MAC, BLE MAC, MicroPython build. |
 | `bthid` | **BLE HID composite — keyboard + mouse over a single GATT service.** Pairs once with macOS / iOS / Android / Windows; bond persists across reboots in `/flash/ble_bonds.json`. Tilt the device (BMI270) to move the mouse cursor; the keyboard sends real key events; arrow keys = clicks / scroll. Includes a Cmd+Ctrl+Q lock-screen macro. |
@@ -101,7 +101,6 @@ live in a JSON file you create on the device once. Current files:
 | `english` | `/flash/english.json` | Mac host/port/token |
 | `usage` | `/flash/usage.json` | usage-server endpoint URL |
 | `qrcode` | `/flash/qrcode.json` | preset QR entries |
-| `sat` | `/flash/sat_loc.json` | manual lat/lon override |
 | `morse` | `apps/morse/{cert,key}.pem` | self-signed TLS for the decoder page |
 
 ## Building your own app
@@ -230,14 +229,14 @@ launcher/
       gencert.sh        # generates the self-signed TLS cert
     prices/             # crypto ticker
     qrcode/             # QR-code generator with presets
-    sat/                # ISS / satellite tracker (SGP4 + skyplot)
+    gps/                # multi-GNSS NMEA receiver (M5 GPS Unit V1.1)
     sensor/
-      env/              # SHT30 + QMP6988 (ENV-III hat)
+      env/              # SHT30 + QMP6988 + SCD40 (ENV-III + CO2 units)
     system/
       sysinfo/          # live system info
       wifi/             # multi-SSID WiFi manager
     usage/              # Claude API usage dashboard
-  libs/                 # shared drivers (SHT30, QMP6988, BMI270)
+  libs/                 # shared drivers (SHT30, QMP6988, SCD40, BMI270)
 ```
 
 ## Hardware reference

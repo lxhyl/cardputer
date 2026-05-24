@@ -10,9 +10,11 @@ on the Mac with `say`).
 
 | Key | Action |
 | --- | --- |
-| `←` `→` | previous / next word |
-| `↑` `↓` | scroll the definition body |
-| `SPACE` | play pronunciation |
+| `←` `→` (or `a` / `d`) | previous / next word |
+| `↑` `↓` (or `w` / `s`) | scroll the definition body |
+| `SPACE` | play headword pronunciation |
+| `p` | play example sentence pronunciation |
+| `Enter` | mark "I know this" + auto-advance |
 | `r` | force re-sync from Mac (rotate to next batch) |
 | `ESC` | exit (uploads session reviews) |
 
@@ -50,8 +52,11 @@ The app writes:
 - `words.json` — last synced batch (words + metadata)
 - `state.json` — `{"prev_batch_id": N}` so the next checkin knows
   what to rotate away from
-- `audio/<id>.wav` — pronunciation per word, downloaded from Mac
-- `audio/<id>.sha` — sidecar hash so unchanged audio isn't re-downloaded
+- `audio/<id>.wav` — headword pronunciation, downloaded from Mac
+- `audio/<id>_ex.wav` — example sentence pronunciation (only when the
+  word has a non-empty example on the Mac side)
+- `audio/<id>.sha`, `audio/<id>_ex.sha` — sidecar hashes so unchanged
+  audio isn't re-downloaded
 
 Stale audio for words not in the current batch is pruned on sync.
 
